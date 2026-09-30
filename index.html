@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Magnus Meeting Voice Recorder</title>
+<style>
+:root{font-family:"Segoe UI",Arial,sans-serif;color:#17345e;background:#f5f7fb}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:linear-gradient(180deg,#f5f7fb,#eef4fb)}
+.card{width:min(460px,100%);background:#fff;border:1px solid #dbe4f0;border-radius:20px;padding:24px;box-shadow:0 18px 50px rgba(20,45,80,.12)}
+h1{font-size:22px;line-height:1.25;margin:0;color:#132b4b}
+p{font-size:13px;line-height:1.55;color:#65758a;margin:8px 0 0}
+.status{margin:20px 0 14px;padding:14px;border-radius:12px;background:#f4f8ff;border:1px solid #d8e6fb;font-weight:700;color:#2a527f;min-height:48px;display:flex;align-items:center}
+.status.live{color:#b42336;background:#fff1f2;border-color:#fecdd3}
+.status.ok{color:#176b48;background:#effbf4;border-color:#ccefd9}
+.status.err{color:#a61b2b;background:#fff1f2;border-color:#fecdd3}
+.timer{font-size:28px;font-weight:700;letter-spacing:.5px;margin:8px 0 18px;color:#132b4b}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{border:0;border-radius:11px;padding:13px 14px;font:inherit;font-weight:700;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+.primary{background:#174d86;color:#fff}.secondary{background:#edf2f7;color:#334155}.danger{background:#fff1f2;color:#b42336;border:1px solid #fecdd3}
+.help{font-size:11px;color:#7b8a9c;margin-top:14px}
+@media(max-width:520px){body{padding:12px}.card{padding:20px}.actions{grid-template-columns:1fr}.timer{font-size:26px}}
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Meeting Voice Recorder</h1>
+  <p>Allow microphone access. Audio stays in this recorder until you choose <b>Stop & Use</b>, then it is sent back to Magnus Meeting Records.</p>
+  <div id="status" class="status">Preparing secure microphone recorder…</div>
+  <div id="timer" class="timer">00:00</div>
+  <div class="actions">
+    <button id="start" class="primary" type="button">Start / Retry</button>
+    <button id="stop" class="danger" type="button" disabled>Stop & Use</button>
+    <button id="cancel" class="secondary" type="button">Cancel</button>
+  </div>
+  <div class="help">Maximum audio size: 6 MB. Keep this window open while recording.</div>
+</main>
+<script>
+(function(){
+  'use strict';
+  var qs=new URLSearchParams(location.search);
+  var nonce=qs.get('nonce')||'';
+  var rec=null,chunks=[],stream=null,done=false,startedAt=0,timerId=null;
+  var status=document.getElementById('status'),timer=document.getElementById('timer');
+  var startBtn=document.getElementById('start'),stopBtn=document.getElementById('stop'),cancelBtn=document.getElementById('cancel');
+
+  function send(payload){
+    payload=payload||{};payload.source='TVM_MEETING_RECORDER';payload.nonce=nonce;
+    try{if(window.opener&&!window.opener.closed)window.opener.postMessage(payload,'*');}catch(e){}
+  }
+  function cleanup(){
+    clearInterval(timerId);timerId=null;
+    try{if(stream)stream.getTracks().forEach(function(t){t.stop();});}catch(e){}
+    stream=null;
+  }
+  function setStatus(text,kind){status.textContent=text;status.className='status'+(kind?' '+kind:'');}
+  function tick(){
+    if(!startedAt){timer.textContent='00:00';return;}
+    var sec=Math.max(0,Math.floor((Date.now()-startedAt)/1000)),m=Math.floor(sec/60),s=sec%60;
+    timer.textContent=String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  }
+  function fail(message){cleanup();setStatus(message,'err');startBtn.disabled=false;stopBtn.disabled=true;send({type:'error',message:message});}
+  function supportedType(){
+    if(typeof MediaRecorder==='undefined')return '';
+    var list=['audio/webm;codecs=opus','audio/webm','audio/ogg'];
+    for(var i=0;i<list.length;i++)if(!MediaRecorder.isTypeSupported||MediaRecorder.isTypeSupported(list[i]))return list[i];
+    return '';
+  }
+  async function startRecording(){
+    if(done)return;
+    if(!nonce){setStatus('Recorder session is invalid. Close this window and start again from Magnus.','err');return;}
+    try{
+      if(!window.isSecureContext)throw new Error('Recorder must be opened from an HTTPS address.');
+      if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||typeof MediaRecorder==='undefined')throw new Error('This browser does not support microphone recording.');
+      setStatus('Requesting microphone permission…','');startBtn.disabled=true;
+      stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+      chunks=[];
+      var opts={audioBitsPerSecond:32000},mime=supportedType();if(mime)opts.mimeType=mime;
+      try{rec=new MediaRecorder(stream,opts);}catch(e){rec=new MediaRecorder(stream);}
+      rec.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data);};
+      rec.onerror=function(){fail('Recording failed. Close this window and try again.');};
+      rec.onstop=function(){
+        if(done)return;done=true;clearInterval(timerId);timerId=null;
+        var mimeType=rec.mimeType||((chunks[0]&&chunks[0].type)||'audio/webm');
+        var blob=new Blob(chunks,{type:mimeType});cleanup();
+        if(!blob.size){fail('No audio was captured.');return;}
+        if(blob.size>6*1024*1024){fail('Recording is larger than 6 MB. Record a shorter clip.');return;}
+        setStatus('Preparing audio…','');
+        var reader=new FileReader();
+        reader.onload=function(){setStatus('Recording ready. Returning to Magnus…','ok');send({type:'ready',dataUrl:reader.result,mime:mimeType,size:blob.size,durationSeconds:Math.max(1,Math.round((Date.now()-startedAt)/1000))});setTimeout(function(){window.close();},250);};
+        reader.onerror=function(){fail('Unable to prepare the recording.');};
+        reader.readAsDataURL(blob);
+      };
+      rec.start(500);startedAt=Date.now();tick();timerId=setInterval(tick,1000);
+      setStatus('● Recording…','live');stopBtn.disabled=false;send({type:'started'});
+    }catch(e){
+      var n=e&&e.name||'';var msg='Unable to start microphone recording.';
+      if(n==='NotAllowedError'||n==='SecurityError')msg='Microphone permission is blocked. Allow microphone access for this site, then press Start / Retry.';
+      else if(n==='NotFoundError')msg='No microphone was found on this device.';
+      else if(e&&e.message)msg=e.message;
+      fail(msg);
+    }
+  }
+  function stopRecording(){
+    if(rec&&rec.state!=='inactive'){stopBtn.disabled=true;setStatus('Stopping and preparing audio…','');rec.stop();}
+  }
+  function cancel(){done=true;cleanup();send({type:'cancelled'});window.close();}
+
+  startBtn.addEventListener('click',startRecording);
+  stopBtn.addEventListener('click',stopRecording);
+  cancelBtn.addEventListener('click',cancel);
+  window.addEventListener('message',function(ev){var d=ev.data||{};if(d.source==='TVM_MAIN_APP'&&d.type==='stop'&&d.nonce===nonce)stopRecording();});
+  window.addEventListener('beforeunload',function(){cleanup();});
+
+  if(!window.opener){setStatus('Open this recorder from Magnus Meeting Records.','err');startBtn.disabled=true;return;}
+  if(!nonce){setStatus('Invalid recorder session. Close this window and start again from Magnus.','err');startBtn.disabled=true;return;}
+  setStatus('Click Start / Retry to allow microphone access.','');
+  setTimeout(startRecording,250);
+})();
+</script>
+</body>
+</html>
